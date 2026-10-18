@@ -20,7 +20,7 @@ def consume(cfg_path: Path, preprocess_path: Path, max_events: int) -> None:
     cfg = yaml.safe_load(cfg_path.read_text())
     enhanced_cfg = yaml.safe_load(Path("configs/enhanced.yaml").read_text())
     state = load_preprocess_state(preprocess_path)
-    system = EnhancedAdaptiveSystem(enhanced_cfg, warmup=cfg["data"]["initial_train_size"])
+    system = EnhancedAdaptiveSystem(enhanced_cfg, warmup_steps=cfg["data"]["initial_train_size"])
 
     consumer = KafkaConsumer(
         cfg["kafka"]["topic"],
@@ -33,7 +33,13 @@ def consume(cfg_path: Path, preprocess_path: Path, max_events: int) -> None:
     n = 0
     for msg in consumer:
         ev = msg.value
-        system.process_event(ev["features"], int(ev["label"]), int(ev["event_index"]), state)
+        system.process_event(
+            ev["features"],
+            int(ev["label"]),
+            stream_step=n,
+            global_event_index=int(ev.get("event_index", n)),
+            state=state,
+        )
         n += 1
         if n >= max_events:
             break

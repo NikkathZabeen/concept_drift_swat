@@ -1,69 +1,118 @@
-# Demo Guide (< 10 minutes)
+# Demonstration Guide (< 10 Minutes)
+
+This guide provides a rapid, step-by-step evaluation workflow for instructors, reviewers, and graders to test and verify the entire SWaT continual learning pipeline.
+
+---
 
 ## Prerequisites
 
-- Python 3.11+ (tested on 3.14)
-- `archive/merged.csv` present
-- Optional: Docker Desktop for Kafka/Grafana segment
+- Python 3.11 or 3.12 (virtual environment activated)
+- Dataset: If `archive/merged.csv` is present, the pipeline runs on the real SWaT dataset; if absent, a self-contained synthetic fixture is automatically used.
+- Optional: Docker Desktop running (for Path B streaming dashboard segment).
 
-## Path A — Local demo (no Docker)
+---
 
+## Path A — Local Demonstration (Core ML Pipeline, ~3 Minutes)
+
+### Step 1: Run Unit Test Suite
+Execute the test suite to verify leak-free preprocessing, warm-up bug fixes, probability metrics, and drift detectors:
+
+**Windows PowerShell:**
+```powershell
+.\.venv\Scripts\pytest -v
+```
+
+**Linux / macOS:**
 ```bash
-source .venv/bin/activate
+pytest tests/ -v
+```
+
+*Expected output:* All 20 tests pass in ~3-4 seconds.
+
+---
+
+### Step 2: Run End-to-End Smoke Demonstration
+Execute the smoke experiment comparing Baseline ADWIN vs Enhanced ADWIN-U-inspired, and automatically generate publication figures:
+
+**Windows PowerShell:**
+```powershell
+.\.venv\Scripts\python run_project.py demo --mode smoke
+```
+
+**Linux / macOS:**
+```bash
 python run_project.py demo --mode smoke
-open results/plots/04_prequential_accuracy.png
-cat results/runs/latest/comparison_table.csv
 ```
 
-**Expected observations**
+*Expected output:*
+- Causal preprocessing state is fitted on the warm-up prefix.
+- Baseline (Hoeffding Tree + Supervised ADWIN) runs prequentially.
+- Enhanced (Adaptive Random Forest + ADWIN-U-inspired) runs prequentially.
+- Output artifacts saved to `results/runs/demo_smoke/` and mirrored to `results/runs/latest/`.
+- 10 publication-quality plots (PNG + PDF) generated under `results/plots/`.
 
-1. Inspection already recorded in `results/dataset_inspection.json`.
-2. Stream window includes Normal→Attack transition (index 1,387,098).
-3. Baseline detects drift via **prediction error** (supervised ADWIN).
-4. Enhanced detects drift via **feature statistics** (ADWIN-U) without using labels in the monitor.
-5. Comparison table shows F1/recall and drift counts (actual numbers, not hardcoded).
+---
 
-## Path B — Streaming infra (requires Docker daemon)
+### Step 3: View Side-by-Side Comparison Table
+Inspect the performance, latency, and drift detection metrics directly in your terminal:
 
+**Windows PowerShell:**
+```powershell
+.\.venv\Scripts\python run_project.py compare --run-dir results/runs/latest
+```
+
+**Linux / macOS:**
 ```bash
-docker compose up -d
-python run_project.py experiment --mode smoke
-# Enable influx in configs/project.yaml → influx.enabled: true
+python run_project.py compare --run-dir results/runs/latest
+```
+
+*Expected observations:*
+1. **Prequential Integrity:** Accuracy, Recall, and F1 are evaluated exclusively on post-warmup scored observations.
+2. **Unsupervised Sensitivity:** Enhanced ADWIN-U triggers drift adaptation based strictly on feature statistics without label feedback.
+3. **Latency Breakdown:** Percentiles (p50, p95, p99) demonstrate that Hoeffding Trees achieve sub-millisecond predictions, whereas 10-tree ARFs incur higher latency in exchange for ensemble resilience.
+4. **Memory Profiling:** Process-level peak RSS is reported using `psutil`.
+
+---
+
+### Step 4: Inspect Generated Figures
+Open the figures generated in `results/plots/`:
+- `04_prequential_accuracy.png` — Rolling accuracy curve over stream positions.
+- `06_drift_timeline.png` — Timeline of baseline vs enhanced drift detection alarms.
+- `12_baseline_vs_enhancement_summary.png` — Side-by-side metric difference bar chart.
+- `01_label_distribution.png` — Class distribution in the evaluated stream.
+
+---
+
+## Path B — Streaming Infrastructure (Optional, Docker Desktop Required)
+
+### Step 1: Launch Streaming Stack
+Start Zookeeper, Kafka, InfluxDB 2.x, and Grafana:
+```powershell
+python run_project.py infra up
+```
+
+### Step 2: Export Run Metrics to InfluxDB
+```powershell
 python -c "from pathlib import Path; from src.storage.influx_writer import write_event_metrics; write_event_metrics(Path('results/runs/latest'), Path('configs/project.yaml'))"
-open http://localhost:3000
 ```
 
-**Expected:** Grafana datasource `InfluxDB-SWaT`; panels update after Influx write.
+### Step 3: View Grafana Dashboard
+1. Open browser to: `http://localhost:3000`
+2. Login credentials: `admin` / `admin` (or skip password change on first launch).
+3. The provisioned datasource `InfluxDB-SWaT` connects to `http://influxdb:8086`.
 
-## Path C — Synthetic drift (if live stream shows no alarm)
-
-The smoke window uses **verified SWaT label boundary** (not synthetic).  
-For synthetic feature drift:
-
-```bash
-python -c "
-from src.drift.adwin_u import ADWINU
-d = ADWINU(delta=0.01, buffer_size=64, min_instances_between_drifts=5)
-for i in range(400):
-    x = {f'f{k}': (5.0 if i > 150 else 0.0) for k in range(10)}
-    if d.update(x, i): print('SYNTHETIC drift at', i)
-"
+### Step 4: Teardown Infrastructure
+```powershell
+python run_project.py infra down
 ```
 
-Label clearly as **synthetic** in presentation slides.
-
-## Recovery
-
-```bash
-docker compose down
-rm -rf results/runs/latest   # if symlink broken, remove target run dir only
-```
+---
 
 ## Troubleshooting
 
-| Issue | Action |
-|-------|--------|
-| `ModuleNotFoundError: src` | Run from repo root; use `pytest.ini` pythonpath |
-| Docker socket error | Start Docker Desktop |
-| Java missing | Use local `experiment` mode; skip Spark |
-| All-zero attack metrics | Increase `smoke_start_index` / include post-1387098 rows |
+| Issue | Root Cause | Solution |
+|-------|------------|----------|
+| `ModuleNotFoundError: No module named 'river'` | Virtualenv not active | Run using `.\.venv\Scripts\python` or activate `.venv` |
+| Symlink error on Windows | Unprivileged symlink | Handled automatically via Directory Junction / pointer fallback |
+| Docker connection failure | Docker Desktop not running | Start Docker Desktop or use Path A (local mode) |
+| Missing `archive/merged.csv` | Dataset git-ignored | Pipeline automatically falls back to synthetic verification fixture |

@@ -17,15 +17,22 @@ def build_comparison_table(baseline: dict[str, Any], enhanced: dict[str, Any]) -
         return cur
 
     rows = [
+        _row("Scored events", g(baseline, "n_events_scored"), g(enhanced, "n_events_scored")),
         _row("Accuracy", g(baseline, "classification", "accuracy"), g(enhanced, "classification", "accuracy")),
-        _row("Precision", g(baseline, "classification", "precision"), g(enhanced, "classification", "precision")),
-        _row("Recall", g(baseline, "classification", "recall"), g(enhanced, "classification", "recall")),
-        _row("F1", g(baseline, "classification", "f1"), g(enhanced, "classification", "f1")),
+        _row("Precision (Attack)", g(baseline, "classification", "precision_attack"), g(enhanced, "classification", "precision_attack")),
+        _row("Recall (Attack)", g(baseline, "classification", "recall_attack"), g(enhanced, "classification", "recall_attack")),
+        _row("F1 (Attack)", g(baseline, "classification", "f1_attack"), g(enhanced, "classification", "f1_attack")),
         _row("ROC-AUC", g(baseline, "classification", "roc_auc"), g(enhanced, "classification", "roc_auc")),
+        _row("PR-AUC", g(baseline, "classification", "pr_auc"), g(enhanced, "classification", "pr_auc")),
         _row(
             "Detected drifts (count)",
             g(baseline, "drift_detection", "n_detected"),
             g(enhanced, "drift_detection", "n_detected"),
+        ),
+        _row(
+            "Raw alarms (count)",
+            g(baseline, "drift_detection", "n_raw_alarms"),
+            g(enhanced, "drift_detection", "n_raw_alarms"),
         ),
         _row(
             "Mean detection delay (events)",
@@ -38,6 +45,12 @@ def build_comparison_table(baseline: dict[str, Any], enhanced: dict[str, Any]) -
             g(enhanced, "drift_detection", "false_alarms"),
         ),
         _row(
+            "False alarm rate (per 10k events)",
+            g(baseline, "drift_detection", "false_alarms_per_10k_events"),
+            g(enhanced, "drift_detection", "false_alarms_per_10k_events"),
+        ),
+        _row("Model resets", g(baseline, "n_model_resets"), g(enhanced, "n_model_resets")),
+        _row(
             "Recovery time (events)",
             g(baseline, "recovery", "recovery_time_events"),
             g(enhanced, "recovery", "recovery_time_events"),
@@ -48,16 +61,30 @@ def build_comparison_table(baseline: dict[str, Any], enhanced: dict[str, Any]) -
             g(enhanced, "streaming", "throughput_events_per_s"),
         ),
         _row(
+            "Event processing throughput (events/s)",
+            g(baseline, "streaming", "event_processing_throughput_events_per_s"),
+            g(enhanced, "streaming", "event_processing_throughput_events_per_s"),
+        ),
+        _row(
+            "Latency p50 (ms)",
+            g(baseline, "streaming", "latency_p50_ms"),
+            g(enhanced, "streaming", "latency_p50_ms"),
+        ),
+        _row(
             "Latency p95 (ms)",
             g(baseline, "streaming", "latency_p95_ms"),
             g(enhanced, "streaming", "latency_p95_ms"),
+        ),
+        _row(
+            "Latency p99 (ms)",
+            g(baseline, "streaming", "latency_p99_ms"),
+            g(enhanced, "streaming", "latency_p99_ms"),
         ),
         _row(
             "Peak memory (MB approx)",
             g(baseline, "peak_memory_mb_approx"),
             g(enhanced, "peak_memory_mb_approx"),
         ),
-        _row("Model resets", g(baseline, "n_model_resets"), g(enhanced, "n_model_resets")),
     ]
     return pd.DataFrame(rows)
 

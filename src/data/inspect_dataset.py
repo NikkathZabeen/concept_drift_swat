@@ -192,6 +192,61 @@ def run_inspect(config: Path, output: Path) -> None:
     logger.info("Wrote %s and %s", output, schema_path)
 
 
+def generate_synthetic_swat_csv(
+    output_path: Path,
+    n_normal: int = 3000,
+    n_attack: int = 1500,
+    seed: int = 42,
+    schema_path: Path | None = None,
+) -> Path:
+    """Generate a synthetic SWaT-format CSV conforming to the exact 53-column schema.
+
+    Used for reproducible unit tests, regression verification, and offline demos
+    when the 407 MB archive/merged.csv is not present locally.
+    """
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    rng = np.random.default_rng(seed)
+
+    cols = [
+        "Timestamp",
+        "FIT101", "LIT101", "MV101", "P101", "P102",
+        "AIT201", "AIT202", "AIT203", "FIT201", "MV201", "P201", "P202", "P203", "P204", "P205", "P206",
+        "DPIT301", "FIT301", "LIT301", "MV301", "MV302", "MV303", "MV304", "P301", "P302",
+        "AIT401", "AIT402", "FIT401", "LIT401", "P401", "P402", "P403", "P404", "UV401",
+        "AIT501", "AIT502", "AIT503", "AIT504", "FIT501", "FIT502", "FIT503", "FIT504", "P501", "P502",
+        "PIT501", "PIT502", "PIT503", "FIT601", "P601", "P602", "P603",
+        "Normal/Attack",
+    ]
+    numeric_cols, cat_cols = classify_columns([c for c in cols if c not in {"Timestamp", "Normal/Attack"}])
+
+    total_rows = n_normal + n_attack
+    start_time = pd.Timestamp("2015-12-28 10:00:00")
+    timestamps = [
+        (start_time + pd.Timedelta(seconds=i)).strftime("%d/%m/%Y %I:%M:%S %p")
+        for i in range(total_rows)
+    ]
+    labels = ["Normal"] * n_normal + ["Attack"] * n_attack
+
+    data: dict[str, list] = {"Timestamp": timestamps}
+    for col in numeric_cols:
+        # Normal phase: mean 10.0, std 1.0. Attack phase: distribution shifts (concept drift)
+        normal_vals = rng.normal(loc=10.0, scale=1.0, size=n_normal)
+        attack_vals = rng.normal(loc=18.0, scale=3.5, size=n_attack)
+        data[col] = list(np.concatenate([normal_vals, attack_vals]))
+
+    for col in cat_cols:
+        normal_vals = rng.choice([1, 2], size=n_normal, p=[0.8, 0.2])
+        attack_vals = rng.choice([1, 2], size=n_attack, p=[0.3, 0.7])
+        data[col] = list(np.concatenate([normal_vals, attack_vals]))
+
+    data["Normal/Attack"] = labels
+    df = pd.DataFrame(data, columns=cols)
+    df.to_csv(output_path, index=False)
+    logger.info("Generated synthetic SWaT CSV at %s (%d rows)", output_path, total_rows)
+    return output_path
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     parser = argparse.ArgumentParser(description="Inspect SWaT CSV datasets")
@@ -207,3 +262,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

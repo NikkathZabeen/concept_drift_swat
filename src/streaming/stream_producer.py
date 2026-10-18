@@ -24,8 +24,22 @@ def produce(
     cfg = yaml.safe_load(cfg_path.read_text())
     csv_path = Path(cfg["data"]["archive_dir"]) / cfg["data"]["primary_file"]
     rate = cfg["stream"].get("replay_rate_hz", 0)
+    configured_smoke_start = int(cfg["stream"].get("smoke_start_index", 0))
+
     if start_index is None:
-        start_index = int(cfg["stream"].get("smoke_start_index", 0))
+        start_index = configured_smoke_start
+        try:
+            with csv_path.open("r", encoding="utf-8") as f:
+                # Read sample lines to verify if file is large enough
+                first_few = [f.readline() for _ in range(100)]
+                # If file is under 1MB or small line count, fallback to 0
+                if csv_path.stat().st_size < 50_000_000:
+                    line_count = sum(1 for _ in csv_path.open("r", encoding="utf-8")) - 1
+                    if line_count <= start_index:
+                        logger.info("Dataset has %d rows <= start_index %d; using start_index=0", line_count, start_index)
+                        start_index = 0
+        except Exception:
+            start_index = 0
 
     producer = None
     topic = cfg["kafka"]["topic"]

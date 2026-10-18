@@ -9,16 +9,18 @@ from river import drift
 
 @dataclass
 class SupervisedADWINDetector:
-    """Monitors 0/1 loss with River's ADWIN (supervised error monitoring)."""
+    """Monitors 0/1 prediction loss with River's ADWIN (supervised error monitoring)."""
 
     delta: float = 0.002
     min_instances_between_drifts: int = 30
     _detector: drift.ADWIN = field(init=False)
     n_instances: int = 0
     n_drifts: int = 0
+    n_raw_alarms: int = 0
     n_warnings: int = 0
     last_drift_index: int | None = None
     drift_indices: list[int] = field(default_factory=list)
+    raw_alarm_indices: list[int] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self._detector = drift.ADWIN(delta=self.delta)
@@ -29,6 +31,8 @@ class SupervisedADWINDetector:
         self.n_instances += 1
         drift_detected = self._detector.drift_detected
         if drift_detected:
+            self.n_raw_alarms += 1
+            self.raw_alarm_indices.append(event_index)
             if (
                 self.last_drift_index is None
                 or event_index - self.last_drift_index >= self.min_instances_between_drifts
@@ -46,3 +50,6 @@ class SupervisedADWINDetector:
     @property
     def estimation(self) -> float:
         return float(getattr(self._detector, "estimation", 0.0))
+
+    def reset_detector(self) -> None:
+        self._detector = drift.ADWIN(delta=self.delta)

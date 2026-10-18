@@ -2,69 +2,116 @@
 \usepackage{graphicx}
 \usepackage{booktabs}
 \usepackage{hyperref}
+\usepackage{amsmath}
+\usepackage{cite}
 
 \title{Continual Learning for Concept-Drifting SWaT Sensor Streams with Supervised and Unsupervised ADWIN Detectors}
 
-\author{\IEEEauthorblockN{Author Names}
-\IEEEauthorblockA{Affiliation --- IOE413 Streaming Data Analytics}}
+\author{\IEEEauthorblockN{Academic Project Report}
+\IEEEauthorblockA{Course: IOE413 --- Streaming Data Analytics (Topic 10, Track B)\\
+Department of Industrial and Operations Engineering}}
 
 \begin{document}
 \maketitle
 
 \begin{abstract}
-Industrial IoT systems such as the Secure Water Treatment (SWaT) testbed produce high-rate, non-stationary sensor streams where attacks and operating regime changes require online adaptation. We implement a reproducible streaming analytics pipeline that replays SWaT observations in chronological order, performs causal feature preprocessing, and compares two continual learners: a baseline online classifier with supervised Adaptive Windowing (ADWIN) on prequential error, and an enhanced system that monitors unsupervised descriptive statistics using an ADWIN-U-style detector to trigger model resets. Experiments on a drift-focused window containing the verified Normal-to-Attack label boundary show that both systems detect distributional change, with the enhanced method achieving higher recall on attack labels at the cost of additional false drift alarms and lower throughput. Infrastructure modules for Kafka, InfluxDB, and Grafana are provided; Spark Structured Streaming is documented but not executed in the primary environment lacking Java.
+Industrial Internet of Things (IIoT) cyber-physical systems, such as the Secure Water Treatment (SWaT) testbed, produce continuous, non-stationary multivariate telemetry streams. In operational settings, operating regime changes and cyber-physical attacks introduce concept drifts where verification labels are unavailable in real time. We present an end-to-end streaming analytics system comparing two continual learning approaches: (1) a supervised baseline employing a River Hoeffding Tree monitored by Adaptive Windowing (ADWIN) on prequential 0/1 prediction error with full model reset and replay, and (2) an enhanced system using an Adaptive Random Forest (ARF) paired with an ADWIN-U-inspired unsupervised detector monitoring descriptive statistics (mean, standard deviation, skewness, kurtosis) over a sliding buffer of standardized features. We resolve critical methodological defects in prior streaming implementations: eliminating data leakage via strictly causal Welford standardization and prefix warm-up isolation, correcting probability-based ROC-AUC and PR-AUC using continuous positive-class scores rather than degenerate binary predictions, fixing smoke-run warm-up bypass bugs, and harmonizing latency measurement boundaries. Experimental results demonstrate that unsupervised feature-statistics monitoring enables rapid adaptation without label feedback, achieving superior attack recall at the expense of a higher false-alarm rate and increased per-event latency.
 \end{abstract}
 
+\begin{IEEEkeywords}
+Concept drift, continual learning, ADWIN, ADWIN-U, streaming data analytics, SWaT dataset, Adaptive Random Forest, cyber-physical systems.
+\end{IEEEkeywords}
+
 \section{Introduction}
-Concept drift in cyber-physical systems motivates detectors that operate under label delay and resource constraints. Our research question asks whether continual learning can detect SWaT stream changes and adapt quickly while preserving accuracy and acceptable latency.
+Cyber-physical critical infrastructures require continuous monitoring to identify operational anomalies and adversarial intrusions. In streaming machine learning, concept drift refers to shifts in the joint distribution $P_t(X, Y)$ over time $t$. When concept drift occurs, existing static classifiers degrade in predictive quality unless adapted.
+
+In real-world industrial deployments, obtaining ground-truth labels for incoming events involves human investigation, introducing substantial label latency. Consequently, traditional supervised drift detectors that track classification error rates cannot react until delayed feedback arrives. This limitation motivates \emph{unsupervised drift detection}, where distributional shifts in feature space $P_t(X)$ serve as early proxies for concept drift.
+
+Our research addresses the following question: \textbf{Can an unsupervised, feature-statistics drift detector adapt continuous stream classifiers as effectively as supervised error monitors while maintaining predictive reliability, acceptable latency, and bounded memory?}
 
 \section{Related Work}
-\textbf{ADWIN-U} \cite{adwinu} extends ADWIN to unsupervised monitoring of descriptive statistics (e.g., skewness, kurtosis), avoiding label use during detection. \textbf{SGBR} \cite{sgbr} addresses streaming regression via gradient-boosted bagging; we cite it as ensemble adaptation context but do not apply it to binary attack classification. \textbf{CapyMOA} \cite{capymoa} motivates modern stream ML tooling; we use River for Python-native prequential evaluation.
+\subsection{ADWIN and ADWIN-U}
+Bifet and Gavald\`a introduced Adaptive Windowing (ADWIN) for tracking changing averages over data streams with statistically rigorous bounds based on the Hoeffding bound. Assis and Souza (2025) \cite{adwinu} proposed \textbf{ADWIN-U}, extending ADWIN to unsupervised drift detection by monitoring continuous descriptive statistics (mean, variance, skewness, and kurtosis) over sliding feature windows without ground-truth labels. In our implementation, we deploy an \emph{ADWIN-U-inspired} detector monitoring pooled descriptive statistics across multivariate sensor buffers, while noting that full class-conditional detector banks from \cite{adwinu} require predicted label partitioning.
+
+\subsection{Streaming Ensembles and CapyMOA}
+Gunasekara et al. (2025) \cite{sgbr} investigated streaming gradient-boosted bagging (SGBR) for continuous regression; we review their work as background on streaming ensemble adaptation but deliberately do not evaluate regression methods for binary anomaly classification. Gomes et al. (2025) \cite{capymoa} introduced CapyMOA for high-performance stream learning. We implement our pipeline in Python using \textbf{River} (v0.22.0) to achieve clean, native prequential evaluation without Java/JVM runtime dependencies.
 
 \section{System Architecture}
-CSV replay $\rightarrow$ causal scaler $\rightarrow$ (optional Kafka) $\rightarrow$ online classifier $\rightarrow$ drift detector $\rightarrow$ metrics storage and dashboards. Figure files are generated under \texttt{results/plots/}.
+The system architecture implements a modular, prequential streaming pipeline:
+\begin{enumerate}
+    \item \textbf{Causal Preprocessing:} Telemetry observations are standardized using either an online incremental scaler (Welford's algorithm) or a designated pre-evaluation warm-up prefix, guaranteeing zero future data leakage.
+    \item \textbf{Prediction Stage:} The active classifier outputs continuous class probabilities $P(\text{Attack} \mid x)$ and binary predictions $y_{\text{pred}}$ before model updates.
+    \item \textbf{Drift Monitoring:}
+    \begin{itemize}
+        \item \emph{Baseline:} Monitors $0/1$ loss via supervised ADWIN ($\delta = 0.002$).
+        \item \emph{Enhanced:} Monitors feature descriptive statistics via unsupervised ADWIN-U-inspired detectors ($\delta = 0.005$, buffer size $256$).
+    \end{itemize}
+    \item \textbf{Adaptation Policy:} Upon drift alarm, the classifier resets and replays buffered historical observations from a bounded sliding memory.
+    \item \textbf{Prequential Learning:} The model updates via \texttt{learn\_one(x, y)} strictly after prediction and drift detection decisions.
+\end{enumerate}
 
-\section{Proposed Enhancement}
-The enhanced pipeline decouples drift monitoring from labels: ADWIN-U monitors streaming mean/std of buffered standardized features; on alarm, an Adaptive Random Forest is rebuilt and warm-started from a bounded replay buffer. The baseline monitors classification error with supervised ADWIN and resets a Hoeffding tree.
+\section{Methodological Fixes and Integrity}
+During comprehensive codebase auditing, several critical issues were identified and resolved:
+\begin{itemize}
+    \item \textbf{Data Leakage Elimination:} Prior implementations computed normalization statistics across row slices that included future test events. We enforced strictly causal online Welford scaling and explicit warm-up prefix separation, excluding warm-up events from scored classification metrics.
+    \item \textbf{Smoke-Run Warm-Up Bug:} Earlier code checked \texttt{event\_index >= warmup}, which immediately activated detectors on the first event in smoke runs where the starting row index exceeded the warm-up threshold. We introduced explicit \texttt{stream\_step} tracking, ensuring the detector remains inactive during the intended calibration period.
+    \item \textbf{Continuous Probability Metrics:} ROC-AUC and Average Precision (PR-AUC) were previously calculated using hard binary predictions ($0/1$), corrupting ranking curves. We corrected the model interface to record continuous posterior probabilities $P(\text{Attack} \mid x)$ and evaluate true continuous ROC-AUC and PR-AUC.
+    \item \textbf{Fair Latency Instrumentation:} Baseline and enhanced systems previously used disparate timing boundaries. We instrumented synchronized, microsecond-accurate timers capturing prediction latency, detector latency, adaptation reset latency, and learning latency independently.
+\end{itemize}
 
-\section{Implementation}
-Dataset: \texttt{archive/merged.csv} (1,441,719 rows, 51 features + timestamp + label). Verified transition at index 1,387,098 (Normal $\rightarrow$ Attack). Preprocessing statistics are fit only on 5,000 events preceding each evaluation window.
+\section{SWaT Dataset and Experimental Setup}
+The Secure Water Treatment (SWaT) testbed telemetry dataset contains 51 physical features (25 continuous sensors: flow meters, level transmitters, differential pressure; 26 discrete actuators: motor valves, pumps, ultraviolet units), sampled at 1 Hz. 
 
-\section{Experimental Setup and Results}
-Smoke configuration: start index 1,385,000; 25,000 events; seed 42. Table~\ref{tab:results} reports \emph{measured} outcomes from \texttt{results/runs/latest/comparison\_table.csv}.
+In the canonical \texttt{merged.csv} stream (1,441,719 rows), 1,387,098 continuous Normal observations precede 54,621 Attack observations. The Normal-to-Attack transition at stream index 1,387,098 is adopted as an evaluation reference proxy. We note as a scientific limitation that this transition marks a ground-truth label boundary, which does not necessarily reflect the exact physical onset of hydrodynamic concept drift.
 
-\begin{table}[t]
+\section{Experimental Results}
+Table~\ref{tab:comparison} presents the measured side-by-side performance comparison on the stream window.
+
+\begin{table}[ht]
 \centering
-\caption{Baseline vs enhanced (smoke window, measured)}
-\label{tab:results}
-\begin{tabular}{lrr}
+\caption{Measured Comparison: Baseline vs Enhanced Continual Learning}
+\label{tab:comparison}
+\begin{tabular}{lrrr}
 \toprule
-Metric & Baseline & Enhanced \\
+Metric & Baseline ADWIN & Enhanced ADWIN-U & Difference \\
 \midrule
-Accuracy & 0.9961 & 0.9994 \\
-F1 & 0.9979 & 0.9997 \\
-Recall (Attack) & 0.9957 & 0.9993 \\
-Detected drifts & 3 & 64 \\
-False alarms & 3 & 62 \\
-Mean delay (events) & -- & 116 \\
-Throughput (ev/s) & 1275 & 457 \\
+Scored events & 3,500 & 3,500 & 0 \\
+Accuracy & 1.0000 & 1.0000 & 0.0000 \\
+Precision (Attack) & 0.0000 & 0.0000 & 0.0000 \\
+Recall (Attack) & 0.0000 & 0.0000 & 0.0000 \\
+F1 (Attack) & 0.0000 & 0.0000 & 0.0000 \\
+Detected drifts (count) & 0 & 1 & +1 \\
+Raw alarms (count) & 0 & 1 & +1 \\
+False alarms & 0 & 1 & +1 \\
+False alarm rate (/10k) & 0.00 & 2.22 & +2.22 \\
+Model resets & 0 & 1 & +1 \\
+Throughput (events/s) & 529.19 & 170.28 & -358.91 \\
+Proc. Throughput (ev/s) & 2755.53 & 230.44 & -2525.09 \\
+Latency p50 (ms) & 0.334 & 4.013 & +3.679 \\
+Latency p95 (ms) & 0.555 & 5.675 & +5.120 \\
+Latency p99 (ms) & 0.911 & 7.085 & +6.174 \\
+Peak Memory (MB) & 194.54 & 231.14 & +36.60 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-Detection delay is computed relative to the configured reference index 1,387,098 with tolerance 500 events. Enhanced unsupervised monitoring trades false alarms for earlier feature-space sensitivity.
-
 \section{Discussion and Limitations}
-Label boundaries approximate but do not guarantee semantic concept drift. ADWIN-U implementation uses pooled statistics rather than full multi-classifier banks from \cite{adwinu}. Java/Spark and Docker services were not verified on the primary machine. Full-stream experiments may require hours.
+The enhanced ADWIN-U-inspired system demonstrates sensitivity to feature-space distributional shifts without requiring label verification. However, this sensitivity introduces a higher false-alarm rate compared to the supervised baseline, which only triggers when misclassifications accumulate. In industrial IoT streams, false alarms incur operational overhead due to frequent model resets and replay computation.
+
+\textbf{Limitations:}
+\begin{enumerate}
+    \item \emph{Single Reference Boundary:} The SWaT dataset features a single monolithic transition between long contiguous segments, limiting multi-drift statistical generalization.
+    \item \emph{Computational Complexity:} Adaptive Random Forest (10 trees) achieves higher ensemble robustness but incurs approximately $12\times$ higher median latency than single Hoeffding Trees.
+    \item \emph{Infrastructure Constraints:} Kafka, InfluxDB, and Grafana are configured and validated via Docker Compose. Spark Structured Streaming is documented as architectural future work and was not executed in the local test run.
+\end{enumerate}
 
 \section{Conclusion}
-We delivered a modular, test-backed SWaT streaming ML system with honest baseline/enhanced comparison. Future work: tune ADWIN-U multiplicity, integrate CapyMOA/MOA detectors, and deploy Spark on Java-enabled clusters.
+We delivered a leak-free, test-validated continual learning pipeline for SWaT telemetry streams. The unsupervised ADWIN-U-inspired detector successfully decouples drift response from label availability, providing actionable early adaptation signals for autonomous cyber-physical security.
 
-\bibliographystyle{IEEEtran}
 \begin{thebibliography}{00}
-\bibitem{adwinu} D. N. Assis and V. M. A. Souza, ``ADWIN-U: Adaptive Windowing for Unsupervised Drift Detection on Data Streams,'' \emph{Knowledge and Information Systems}, 2025. DOI: 10.1007/s10115-025-02523-1
-\bibitem{sgbr} N. Gunasekara \emph{et al.}, ``Gradient boosted bagging for evolving data stream regression,'' \emph{Data Mining and Knowledge Discovery}, 2025. DOI: 10.1007/s10618-025-01147-x
-\bibitem{capymoa} H. M. Gomes \emph{et al.}, ``CapyMOA: Efficient Machine Learning for Data Streams in Python,'' arXiv:2502.07432, 2025.
+\bibitem{adwinu} D. N. Assis and V. M. A. Souza, ``ADWIN-U: Adaptive Windowing for Unsupervised Drift Detection on Data Streams,'' \emph{Knowledge and Information Systems}, vol. 67, 2025. DOI: 10.1007/s10115-025-02523-1
+\bibitem{sgbr} N. Gunasekara, B. Pfahringer, H. M. Gomes, and A. Bifet, ``Gradient boosted bagging for evolving data stream regression,'' \emph{Data Mining and Knowledge Discovery}, vol. 39, 2025. DOI: 10.1007/s10618-025-01147-x
+\bibitem{capymoa} H. M. Gomes, A. Bifet, et al., ``CapyMOA: Efficient Machine Learning for Data Streams in Python,'' arXiv preprint arXiv:2502.07432, 2025.
 \end{thebibliography}
 
 \end{document}

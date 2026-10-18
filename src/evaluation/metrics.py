@@ -24,23 +24,62 @@ class RecoveryConfig:
     min_pre_window: int = 200
 
 
-def classification_metrics(y_true: list[int], y_pred: list[int]) -> dict[str, Any]:
+def classification_metrics(
+    y_true: list[int],
+    y_pred: list[int],
+    y_score: list[float] | None = None,
+) -> dict[str, Any]:
+    """Compute classification metrics with continuous probability ranking metrics.
+
+    Requirements:
+    - ROC-AUC and Average Precision (PR-AUC) use continuous predicted probability
+      scores for class 1 (Attack).
+    - If continuous scores are not provided or if y_true contains only a single class,
+      roc_auc and pr_auc are safely returned as None (not estimated via hard binary predictions).
+    - Class 1 (Attack) precision, recall, and F1 are explicitly provided.
+    """
     if not y_true:
         return {}
+
     cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
+    tn, fp, fn, tp = int(cm[0, 0]), int(cm[0, 1]), int(cm[1, 0]), int(cm[1, 1])
+
+    acc = float(accuracy_score(y_true, y_pred))
+    prec = float(precision_score(y_true, y_pred, pos_label=1, zero_division=0))
+    rec = float(recall_score(y_true, y_pred, pos_label=1, zero_division=0))
+    f1 = float(f1_score(y_true, y_pred, pos_label=1, zero_division=0))
+
     out: dict[str, Any] = {
-        "accuracy": float(accuracy_score(y_true, y_pred)),
-        "precision": float(precision_score(y_true, y_pred, zero_division=0)),
-        "recall": float(recall_score(y_true, y_pred, zero_division=0)),
-        "f1": float(f1_score(y_true, y_pred, zero_division=0)),
+        "accuracy": acc,
+        "precision": prec,
+        "precision_attack": prec,
+        "recall": rec,
+        "recall_attack": rec,
+        "f1": f1,
+        "f1_attack": f1,
         "confusion_matrix": cm.tolist(),
+        "true_negatives": tn,
+        "false_positives": fp,
+        "false_negatives": fn,
+        "true_positives": tp,
+        "roc_auc": None,
+        "pr_auc": None,
     }
-    if len(set(y_true)) > 1:
-        try:
-            out["roc_auc"] = float(roc_auc_score(y_true, y_pred))
-            out["pr_auc"] = float(average_precision_score(y_true, y_pred))
-        except ValueError:
-            pass
+
+    # Probability-based ranking metrics: requires continuous scores and both classes present
+    if y_score is not None and len(y_score) == len(y_true):
+        unique_classes = set(y_true)
+        if len(unique_classes) > 1:
+            try:
+                out["roc_auc"] = float(roc_auc_score(y_true, y_score))
+            except ValueError:
+                out["roc_auc"] = None
+
+            try:
+                out["pr_auc"] = float(average_precision_score(y_true, y_score))
+            except ValueError:
+                out["pr_auc"] = None
+
     return out
 
 
@@ -60,11 +99,22 @@ def drift_detection_metrics(
     reference_indices: list[int],
     tolerance: int = 500,
     stream_length: int | None = None,
+    raw_detected_indices: list[int] | None = None,
 ) -> dict[str, Any]:
-    """Match detected drifts to reference points within tolerance (event-time delay)."""
+    """Match detected drifts to reference points within tolerance (event-time delay).
+
+    Honest reporting:
+    - Distinguishes raw statistical alarms from cooldown-filtered model resets.
+    - Matches candidate detections within tolerance window of reference events.
+    - Computes detection delays and false alarms outside tolerance.
+    """
+    n_detected = len(detected_indices)
+    n_raw = len(raw_detected_indices) if raw_detected_indices is not None else n_detected
+
     if not reference_indices:
         return {
-            "n_detected": len(detected_indices),
+            "n_detected": n_detected,
+            "n_raw_alarms": n_raw,
             "n_reference": 0,
             "note": "No reference drift indices configured",
         }
@@ -91,16 +141,19 @@ def drift_detection_metrics(
                 false_alarms += 1
 
     out: dict[str, Any] = {
-        "n_detected": len(detected_indices),
+        "n_detected": n_detected,
+        "n_raw_alarms": n_raw,
         "n_reference": len(reference_indices),
         "detection_delays_event_index": matched_delays,
         "mean_detection_delay": float(np.mean(matched_delays)) if matched_delays else None,
         "missed_reference_drifts": missed,
+        "matched_reference_events": len(matched_delays),
+        "unmatched_alarms": false_alarms,
         "false_alarms": false_alarms,
         "tolerance_events": tolerance,
     }
-    if stream_length:
-        out["false_alarms_per_10k_events"] = false_alarms / (stream_length / 10_000)
+    if stream_length and stream_length > 0:
+        out["false_alarms_per_10k_events"] = float(false_alarms / (stream_length / 10_000))
     return out
 
 
@@ -135,12 +188,46 @@ def recovery_time_events(
     return {"recovered": False, "recovery_time_events": None, "pre_drift_accuracy": pre_acc}
 
 
-def streaming_perf(latencies_ms: list[float], total_wall_s: float, n_events: int) -> dict[str, float]:
-    if not latencies_ms:
+def streaming_perf(
+    latencies_total_ms: list[float],
+    total_wall_s: float,
+    n_events: int,
+    latencies_pred_ms: list[float] | None = None,
+    latencies_det_ms: list[float] | None = None,
+    latencies_learn_ms: list[float] | None = None,
+) -> dict[str, float]:
+    """Fair streaming performance instrumentation distinguishing stages and reporting percentiles."""
+    if not latencies_total_ms:
         return {}
-    arr = np.array(latencies_ms)
-    return {
-        "latency_mean_ms": float(arr.mean()),
-        "latency_p95_ms": float(np.percentile(arr, 95)),
-        "throughput_events_per_s": n_events / total_wall_s if total_wall_s > 0 else 0.0,
+
+    arr_tot = np.array(latencies_total_ms)
+    tot_processing_s = float(np.sum(arr_tot) / 1000.0)
+
+    perf: dict[str, float] = {
+        "latency_mean_ms": float(arr_tot.mean()),
+        "latency_p50_ms": float(np.percentile(arr_tot, 50)),
+        "latency_p95_ms": float(np.percentile(arr_tot, 95)),
+        "latency_p99_ms": float(np.percentile(arr_tot, 99)),
+        "throughput_events_per_s": float(n_events / total_wall_s) if total_wall_s > 0 else 0.0,
+        "event_processing_throughput_events_per_s": float(n_events / tot_processing_s) if tot_processing_s > 0 else 0.0,
     }
+
+    if latencies_pred_ms:
+        arr_p = np.array(latencies_pred_ms)
+        perf["latency_pred_mean_ms"] = float(arr_p.mean())
+        perf["latency_pred_p50_ms"] = float(np.percentile(arr_p, 50))
+        perf["latency_pred_p95_ms"] = float(np.percentile(arr_p, 95))
+
+    if latencies_det_ms:
+        arr_d = np.array(latencies_det_ms)
+        perf["latency_detector_mean_ms"] = float(arr_d.mean())
+        perf["latency_detector_p50_ms"] = float(np.percentile(arr_d, 50))
+        perf["latency_detector_p95_ms"] = float(np.percentile(arr_d, 95))
+
+    if latencies_learn_ms:
+        arr_l = np.array(latencies_learn_ms)
+        perf["latency_learn_mean_ms"] = float(arr_l.mean())
+        perf["latency_learn_p50_ms"] = float(np.percentile(arr_l, 50))
+        perf["latency_learn_p95_ms"] = float(np.percentile(arr_l, 95))
+
+    return perf
