@@ -194,8 +194,8 @@ def run_inspect(config: Path, output: Path) -> None:
 
 def generate_synthetic_swat_csv(
     output_path: Path,
-    n_normal: int = 3000,
-    n_attack: int = 1500,
+    n_normal: int = 2000,
+    n_attack: int = 4000,
     seed: int = 42,
     schema_path: Path | None = None,
 ) -> Path:

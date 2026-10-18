@@ -100,13 +100,19 @@ def drift_detection_metrics(
     tolerance: int = 500,
     stream_length: int | None = None,
     raw_detected_indices: list[int] | None = None,
+    start_index: int = 0,
 ) -> dict[str, Any]:
     """Match detected drifts to reference points within tolerance (event-time delay).
 
-    Honest reporting:
+    Coordinate systems & Honest reporting:
+    - Global dataset indices or local stream steps can be evaluated.
+    - If stream_length is given, references are filtered into window:
+      in-window references lie within [start_index, start_index + stream_length).
+      References outside this window are reported explicitly as outside the evaluation window,
+      and are NOT penalized as missed detections in this window.
+    - Delays are signed: (detection - reference). Positive = late detection; Negative = anticipatory alarm.
     - Distinguishes raw statistical alarms from cooldown-filtered model resets.
-    - Matches candidate detections within tolerance window of reference events.
-    - Computes detection delays and false alarms outside tolerance.
+    - Operational false alarms are alarms triggered outside +/- tolerance events of in-window references.
     """
     n_detected = len(detected_indices)
     n_raw = len(raw_detected_indices) if raw_detected_indices is not None else n_detected
@@ -116,15 +122,27 @@ def drift_detection_metrics(
             "n_detected": n_detected,
             "n_raw_alarms": n_raw,
             "n_reference": 0,
+            "n_reference_in_window": 0,
+            "references_in_window": [],
+            "references_outside_window": [],
             "note": "No reference drift indices configured",
         }
+
+    # Partition reference indices into in-window vs outside-window
+    if stream_length is not None and stream_length > 0:
+        window_end = start_index + stream_length
+        in_window_refs = [r for r in reference_indices if start_index <= r < window_end]
+        outside_window_refs = [r for r in reference_indices if r not in in_window_refs]
+    else:
+        in_window_refs = list(reference_indices)
+        outside_window_refs = []
 
     matched_delays: list[int] = []
     false_alarms = 0
     missed = 0
     used_detections: set[int] = set()
 
-    for ref in reference_indices:
+    for ref in in_window_refs:
         candidates = [
             d for d in detected_indices if abs(d - ref) <= tolerance and d not in used_detections
         ]
@@ -137,21 +155,28 @@ def drift_detection_metrics(
 
     for d in detected_indices:
         if d not in used_detections:
-            if not any(abs(d - ref) <= tolerance for ref in reference_indices):
+            if not any(abs(d - ref) <= tolerance for ref in in_window_refs):
                 false_alarms += 1
 
     out: dict[str, Any] = {
         "n_detected": n_detected,
         "n_raw_alarms": n_raw,
         "n_reference": len(reference_indices),
+        "n_reference_in_window": len(in_window_refs),
+        "references_in_window": in_window_refs,
+        "references_outside_window": outside_window_refs,
         "detection_delays_event_index": matched_delays,
         "mean_detection_delay": float(np.mean(matched_delays)) if matched_delays else None,
         "missed_reference_drifts": missed,
         "matched_reference_events": len(matched_delays),
         "unmatched_alarms": false_alarms,
         "false_alarms": false_alarms,
+        "false_alarms_operational_definition": "Statistical alarms occurring outside tolerance window of configured reference points (evaluation proxy, not verified physical false drift)",
         "tolerance_events": tolerance,
     }
+    if outside_window_refs and not in_window_refs:
+        out["note"] = "All configured reference drift points lie outside the evaluated stream window"
+
     if stream_length and stream_length > 0:
         out["false_alarms_per_10k_events"] = float(false_alarms / (stream_length / 10_000))
     return out
@@ -164,13 +189,25 @@ def recovery_time_events(
 ) -> dict[str, Any]:
     """Recovery = first index after drift where rolling accuracy >= threshold * pre-drift accuracy."""
     cfg = cfg or RecoveryConfig()
-    if drift_index >= len(correct_flags):
-        return {"recovered": False, "recovery_time_events": None}
+    if drift_index < 0 or drift_index >= len(correct_flags):
+        return {
+            "recovered": False,
+            "recovery_time_events": None,
+            "reason": "reference_outside_evaluation_window",
+            "evaluated_drift_index": drift_index,
+            "stream_length": len(correct_flags),
+        }
 
     pre_start = max(0, drift_index - cfg.window)
     pre = correct_flags[pre_start:drift_index]
     if len(pre) < cfg.min_pre_window:
-        return {"recovered": False, "recovery_time_events": None, "reason": "insufficient_pre_window"}
+        return {
+            "recovered": False,
+            "recovery_time_events": None,
+            "reason": "insufficient_pre_window",
+            "pre_window_length": len(pre),
+            "min_required": cfg.min_pre_window,
+        }
 
     pre_acc = float(np.mean(pre))
     threshold = cfg.threshold_fraction_of_pre_drift * pre_acc
@@ -185,7 +222,14 @@ def recovery_time_events(
                 "pre_drift_accuracy": pre_acc,
                 "threshold": threshold,
             }
-    return {"recovered": False, "recovery_time_events": None, "pre_drift_accuracy": pre_acc}
+    return {
+        "recovered": False,
+        "recovery_time_events": None,
+        "pre_drift_accuracy": pre_acc,
+        "reason": "threshold_not_reached",
+    }
+
+
 
 
 def streaming_perf(

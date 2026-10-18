@@ -27,7 +27,8 @@ Execute the test suite to verify leak-free preprocessing, warm-up bug fixes, pro
 pytest tests/ -v
 ```
 
-*Expected output:* All 20 tests pass in ~3-4 seconds.
+*Expected output:* All 23 tests pass in ~5-6 seconds.
+
 
 ---
 

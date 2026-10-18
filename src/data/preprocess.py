@@ -148,6 +148,21 @@ class OnlineStandardScaler:
             warmup_n=self.n_samples,
         )
 
+    def clone(self) -> OnlineStandardScaler:
+        """Create an independent copy of this scaler's current Welford statistics."""
+        scaler = OnlineStandardScaler(
+            feature_order=list(self.feature_order),
+            numeric_cols=list(self.numeric_cols),
+            categorical_cols=list(self.categorical_cols),
+        )
+        scaler.counts = dict(self.counts)
+        scaler.means = dict(self.means)
+        scaler.m2 = dict(self.m2)
+        scaler.categorical_maps = {k: dict(v) for k, v in self.categorical_maps.items()}
+        scaler.n_samples = self.n_samples
+        return scaler
+
+
 
 def load_config(path: Path) -> dict:
     with path.open() as f:

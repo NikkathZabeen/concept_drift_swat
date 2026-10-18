@@ -22,7 +22,6 @@ from src.data.inspect_dataset import generate_synthetic_swat_csv
 from src.data.preprocess import (
     OnlineStandardScaler,
     PreprocessState,
-    fit_preprocess_state,
     iter_swat_events,
     save_preprocess_state,
 )
@@ -62,12 +61,62 @@ def get_git_commit() -> str:
         return "unknown"
 
 
+def validate_scored_window_labels(
+    csv_path: Path,
+    cfg: dict,
+    start_index: int,
+    warmup_steps: int,
+    max_events: int | None,
+) -> dict[str, int]:
+    """Inspect upcoming scored stream slice and validate class distribution."""
+    scored_start = start_index + warmup_steps
+    scored_max = (max_events - warmup_steps) if max_events is not None else None
+    scored_end = (start_index + max_events) if max_events is not None else None
+
+    label_counts: dict[int, int] = {0: 0, 1: 0}
+    scored_events = iter_swat_events(
+        csv_path,
+        cfg,
+        max_events=scored_max,
+        start_index=scored_start,
+    )
+    for ev in scored_events:
+        lbl = int(ev["label"])
+        label_counts[lbl] = label_counts.get(lbl, 0) + 1
+
+    n_normal = label_counts.get(0, 0)
+    n_attack = label_counts.get(1, 0)
+    total_scored = n_normal + n_attack
+
+    logger.info(
+        "Pre-run scored window validation [%d, %s): Normal=%d, Attack=%d (Total scored=%d)",
+        scored_start,
+        str(scored_end) if scored_end is not None else "EOF",
+        n_normal,
+        n_attack,
+        total_scored,
+    )
+
+    if total_scored == 0:
+        logger.warning("WARNING: Scored window contains zero events!")
+    elif n_normal == 0 or n_attack == 0:
+        dominant = "Normal" if n_attack == 0 else "Attack"
+        logger.warning(
+            "WARNING: Scored window contains only ONE class (%s: %d, other: 0)! "
+            "Attack detection metrics (precision, recall, F1, ROC-AUC) will be zero or undefined.",
+            dominant,
+            total_scored,
+        )
+
+    return {"Normal": n_normal, "Attack": n_attack}
+
+
 def run_method(
     name: str,
     system: BaselineADWINSystem | EnhancedAdaptiveSystem,
     events,
-    state: PreprocessState | OnlineStandardScaler,
-    max_events: int | None,
+    state: PreprocessState | OnlineStandardScaler | None = None,
+    max_events: int | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     proc = psutil.Process()
@@ -78,14 +127,16 @@ def run_method(
         step = ev["stream_step"]
         global_idx = ev["global_event_index"]
         label = int(ev["label"])
-        row = system.process_event(ev["features"], label, step, global_idx, state)
+        row = system.process_event(ev["features"], label, step, global_idx, state=state)
         rows.append(row)
         if max_events is not None and len(rows) >= max_events:
             break
 
     wall = time.perf_counter() - t0
-    mem_after_mb = proc.memory_info().rss / (1024 * 1024)
-    peak_mb = max(mem_before_mb, mem_after_mb)
+    mem_info = proc.memory_info()
+    mem_after_mb = mem_info.rss / (1024 * 1024)
+    peak_wset_mb = getattr(mem_info, "peak_wset", 0) / (1024 * 1024)
+    peak_mb = max(mem_before_mb, mem_after_mb, peak_wset_mb)
 
     # Separate scored events from warm-up prefix events
     scored_rows = [r for r in rows if r["is_warmup"] == 0]
@@ -115,12 +166,6 @@ def run_method(
         "classification": classification_metrics(y_true, y_pred, y_score),
         "prequential_accuracy_curve": prequential_curve(correct, window=1000),
         "prequential_f1_curve": _rolling_f1(y_true, y_pred, window=1000),
-        "drift_detection": drift_detection_metrics(
-            drift_idx,
-            reference_indices({}),  # filled by caller with cfg refs
-            stream_length=len(rows),
-            raw_detected_indices=raw_drift_idx,
-        ),
         "streaming": streaming_perf(
             lat_total,
             wall,
@@ -130,6 +175,7 @@ def run_method(
             latencies_learn_ms=lat_learn,
         ),
         "peak_memory_mb_approx": float(peak_mb),
+        "peak_memory_method": "psutil_rss_and_peak_wset",
         "n_model_resets": getattr(system, "n_resets", 0),
         "n_updates": getattr(system, "n_updates", 0),
         "detected_drift_indices": drift_idx,
@@ -164,32 +210,36 @@ def run_experiment(
     archive = Path(project_cfg["data"]["archive_dir"])
     csv_path = archive / project_cfg["data"]["primary_file"]
 
-    # Verify dataset file or fallback to synthetic test fixture with explicit provenance
-    dataset_provenance = "canonical_swat_archive"
-    if not csv_path.exists():
-        logger.warning(
-            "Dataset %s not found. Generating synthetic SWaT stream for verification.",
-            csv_path,
-        )
-        generate_synthetic_swat_csv(
-            csv_path,
-            n_normal=project_cfg["data"].get("initial_train_size", 5000) + 5000,
-            n_attack=3000,
-            seed=seed,
-        )
-        dataset_provenance = "synthetic_fixture_verification"
+    # Check whether the dataset is the canonical full SWaT dataset (>50 MB) or synthetic verification fixture
+    canonical_min_bytes = 50 * 1024 * 1024
+    is_canonical = csv_path.exists() and csv_path.stat().st_size >= canonical_min_bytes
 
-    start_index = 0
+    if is_canonical:
+        dataset_provenance = "canonical_swat_archive"
+    else:
+        dataset_provenance = "synthetic_fixture_verification"
+        # Ensure a clean synthetic verification fixture with transition at index 2000
+        # Normal rows = 2000, Attack rows = 4000 (total 6000 rows)
+        needs_generation = not csv_path.exists() or csv_path.stat().st_size > 15 * 1024 * 1024 or csv_path.stat().st_size < 1000
+        if needs_generation:
+            logger.info("Generating standard synthetic SWaT stream for verification at %s", csv_path)
+            generate_synthetic_swat_csv(
+                csv_path,
+                n_normal=2000,
+                n_attack=4000,
+                seed=seed,
+            )
+
     configured_warmup = int(project_cfg["data"].get("warmup_min_labeled", 5000))
 
     if dataset_provenance == "synthetic_fixture_verification":
         start_index = 0
-        max_events = 4500 if mode == "smoke" else 8000
+        max_events = 5000 if mode == "smoke" else (6000 if mode == "full" else int(mode))
         warmup_steps = 1000
-        refs = [3000]
+        refs = [2000]  # Known synthetic label boundary at row 2000
     elif mode == "smoke":
-        max_events = project_cfg["stream"].get("smoke_max_events", 25000)
-        start_index = int(project_cfg["stream"].get("smoke_start_index", 0))
+        max_events = int(project_cfg["stream"].get("smoke_max_events", 25000))
+        start_index = int(project_cfg["stream"].get("smoke_start_index", 1385000))
         warmup_steps = min(configured_warmup, 2000)
         refs = reference_indices(project_cfg)
     elif mode == "full":
@@ -213,18 +263,18 @@ def run_experiment(
         dataset_provenance,
     )
 
-    # Causal preprocessing: fit strictly on the initial warm-up prefix
-    events_for_fit = iter_swat_events(
+    # Pre-run validation: check label distribution in upcoming scored window
+    scored_label_dist = validate_scored_window_labels(
         csv_path,
         project_cfg,
-        max_events=warmup_steps,
         start_index=start_index,
+        warmup_steps=warmup_steps,
+        max_events=max_events,
     )
-    state = fit_preprocess_state(events_for_fit, project_cfg, warmup_n=warmup_steps)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    save_preprocess_state(state, output_dir / "preprocess_state.json")
 
-    # Baseline run
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. Baseline run with its own independent OnlineStandardScaler
     baseline = BaselineADWINSystem(
         baseline_cfg,
         seed=seed,
@@ -233,9 +283,15 @@ def run_experiment(
     baseline_events = iter_swat_events(
         csv_path, project_cfg, max_events=max_events, start_index=start_index
     )
-    b_rows, b_summary = run_method("baseline_adwin", baseline, baseline_events, state, max_events)
+    b_rows, b_summary = run_method(
+        "baseline_adwin",
+        baseline,
+        baseline_events,
+        state=None,  # BaselineADWINSystem uses its own self.scaler causally
+        max_events=max_events,
+    )
 
-    # Enhanced run (same preprocess state, fresh stream)
+    # 2. Enhanced run with its own independent OnlineStandardScaler
     enhanced = EnhancedAdaptiveSystem(
         enhanced_cfg,
         seed=seed,
@@ -244,40 +300,76 @@ def run_experiment(
     e_events = iter_swat_events(
         csv_path, project_cfg, max_events=max_events, start_index=start_index
     )
-    e_rows, e_summary = run_method("enhanced_adaptive", enhanced, e_events, state, max_events)
+    e_rows, e_summary = run_method(
+        "enhanced_adaptive",
+        enhanced,
+        e_events,
+        state=None,  # EnhancedAdaptiveSystem uses its own self.scaler causally
+        max_events=max_events,
+    )
 
-    refs = reference_indices(project_cfg)
-    for summary in (b_summary, e_summary):
-        method_rows = b_rows if summary["method"] == "baseline_adwin" else e_rows
+    # Coordinate mapping and drift evaluation:
+    # Convert global references into window and local run steps for delay and recovery metrics
+    for summary, method_rows in ((b_summary, b_rows), (e_summary, e_rows)):
         summary["drift_detection"] = drift_detection_metrics(
             summary["detected_drift_indices"],
             refs,
             tolerance=500,
             stream_length=summary["n_events_total"],
             raw_detected_indices=summary.get("raw_drift_indices"),
+            start_index=start_index,
         )
-        if refs:
-            # Recovery measured around first reference drift
-            summary["recovery"] = recovery_time_events(
-                [r["correct"] for r in method_rows],
-                refs[0] if refs[0] < len(method_rows) else max(0, len(method_rows) // 2),
-            )
+
+        in_window_refs = summary["drift_detection"]["references_in_window"]
+        if in_window_refs:
+            ref_global = in_window_refs[0]
+            ref_local = ref_global - start_index
+            if ref_local < warmup_steps:
+                summary["recovery"] = {
+                    "recovered": False,
+                    "recovery_time_events": None,
+                    "reason": "reference_in_warmup_prefix",
+                    "global_reference_index": ref_global,
+                    "local_reference_index": ref_local,
+                }
+            else:
+                rec = recovery_time_events([r["correct"] for r in method_rows], ref_local)
+                rec["global_reference_index"] = ref_global
+                rec["local_reference_index"] = ref_local
+                summary["recovery"] = rec
+        else:
+            summary["recovery"] = {
+                "recovered": False,
+                "recovery_time_events": None,
+                "reason": "reference_outside_evaluation_window",
+                "all_configured_references": refs,
+            }
+
+    # Save fitted scaler states for transparency
+    save_preprocess_state(baseline.scaler.to_state(), output_dir / "baseline_scaler_state.json")
+    save_preprocess_state(enhanced.scaler.to_state(), output_dir / "enhanced_scaler_state.json")
+    save_preprocess_state(baseline.scaler.to_state(), output_dir / "preprocess_state.json")
 
     meta = {
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "git_commit": get_git_commit(),
         "mode": mode,
         "dataset_provenance": dataset_provenance,
-        "max_events": max_events,
-        "start_index": start_index,
-        "warmup_steps": warmup_steps,
-        "n_events_scored": b_summary["n_events_scored"],
+        "stream_window": {
+            "start_index": start_index,
+            "max_events": max_events,
+            "warmup_steps": warmup_steps,
+            "n_events_scored": b_summary["n_events_scored"],
+            "n_events_warmup": b_summary["n_events_warmup"],
+            "n_events_total": b_summary["n_events_total"],
+        },
+        "scored_label_distribution": scored_label_dist,
+        "reference_drift_indices": refs,
         "python": sys.version,
         "platform": platform.platform(),
         "river": river.__version__,
         "sklearn": sklearn.__version__,
         "project_cfg": str(project_cfg_path),
-        "reference_drift_indices": refs,
         "status": "COMPLETED",
     }
 

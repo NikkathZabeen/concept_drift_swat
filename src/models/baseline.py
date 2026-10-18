@@ -21,6 +21,7 @@ class BaselineADWINSystem:
     classifier: Any = field(init=False)
     detector: SupervisedADWINDetector = field(init=False)
     buffer: ReplayBuffer = field(init=False)
+    scaler: OnlineStandardScaler = field(default_factory=OnlineStandardScaler)
     n_resets: int = 0
     n_updates: int = 0
     warmup_steps: int = 5000
@@ -36,6 +37,8 @@ class BaselineADWINSystem:
         )
         adapt = self.cfg.get("adaptation", {})
         self.buffer = ReplayBuffer(adapt.get("retrain_buffer_size", 2000))
+        if not hasattr(self, "scaler") or self.scaler is None:
+            self.scaler = OnlineStandardScaler()
 
     def predict_proba(self, x: dict[str, float]) -> tuple[int, float]:
         """Return (predicted_class, positive_class_probability)."""
@@ -71,18 +74,20 @@ class BaselineADWINSystem:
         label: int,
         stream_step: int,
         global_event_index: int,
-        state: PreprocessState | OnlineStandardScaler,
+        state: PreprocessState | OnlineStandardScaler | None = None,
     ) -> dict[str, Any]:
         """Prequential evaluation step:
 
-        1. Transform features causally.
+        1. Transform features causally using statistics computed strictly prior to this observation.
         2. Predict continuous score and binary class before learning.
         3. Supervised drift monitor update (active only after warmup_steps).
         4. Trigger adaptation on drift alarm.
         5. Learn from true label and buffer for replay.
+        6. Causally update scaler statistics after transform, prediction, and drift decision.
         """
+        active_scaler = state if state is not None else self.scaler
         t0 = time.perf_counter()
-        x = vectorize_event(features_raw, state)
+        x = vectorize_event(features_raw, active_scaler)
         y_pred, y_score = self.predict_proba(x)
         t1 = time.perf_counter()
         t_pred_ms = (t1 - t0) * 1000.0
@@ -107,8 +112,9 @@ class BaselineADWINSystem:
         self.buffer.add(x, label)
         self.n_updates += 1
 
-        if isinstance(state, OnlineStandardScaler):
-            state.update_one(features_raw)
+        # Causal scaler update: strictly after transform and prediction
+        if isinstance(active_scaler, OnlineStandardScaler):
+            active_scaler.update_one(features_raw)
 
         t4 = time.perf_counter()
         t_learn_ms = (t4 - t3) * 1000.0

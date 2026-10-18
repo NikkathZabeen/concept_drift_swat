@@ -80,3 +80,58 @@ def test_baseline_and_enhanced_model_resets():
     e_sys.buffer.add({"FIT101": 1.0}, 0)
     e_sys.on_drift()
     assert e_sys.n_resets == 1
+
+
+def test_drift_metrics_signed_delays_and_operational_false_alarms():
+    """Verify signed delays, raw alarm distinction, and operational false alarm definitions."""
+    # 1. Negative delay (early / anticipatory detection before reference)
+    m_early = drift_detection_metrics(
+        detected_indices=[980],  # 20 events before reference at 1000
+        reference_indices=[1000],
+        tolerance=50,
+        stream_length=2000,
+        raw_detected_indices=[978, 980],
+    )
+    assert m_early["detection_delays_event_index"] == [-20]
+    assert m_early["mean_detection_delay"] == -20.0
+    assert m_early["matched_reference_events"] == 1
+    assert m_early["missed_reference_drifts"] == 0
+    assert m_early["false_alarms"] == 0
+    assert m_early["n_raw_alarms"] == 2
+    assert m_early["n_detected"] == 1
+
+    # 2. Positive delay (late detection after reference)
+    m_late = drift_detection_metrics(
+        detected_indices=[1035],  # 35 events after reference at 1000
+        reference_indices=[1000],
+        tolerance=50,
+        stream_length=2000,
+    )
+    assert m_late["detection_delays_event_index"] == [35]
+    assert m_late["mean_detection_delay"] == 35.0
+
+    # 3. Operational false alarms: detections outside tolerance of any in-window reference
+    m_fa = drift_detection_metrics(
+        detected_indices=[200, 1010],  # 200 is far outside tolerance 50
+        reference_indices=[1000],
+        tolerance=50,
+        stream_length=2000,
+    )
+    assert m_fa["matched_reference_events"] == 1
+    assert m_fa["unmatched_alarms"] == 1
+    assert m_fa["false_alarms"] == 1
+    assert "tolerance window" in m_fa["false_alarms_operational_definition"]
+
+
+    # 4. Out-of-window references are reported as outside and not penalized as missed in-window
+    m_out = drift_detection_metrics(
+        detected_indices=[1500],
+        reference_indices=[5000],  # 5000 is outside [1000, 2000)
+        tolerance=50,
+        stream_length=1000,
+        start_index=1000,
+    )
+    assert m_out["n_reference_in_window"] == 0
+    assert m_out["references_outside_window"] == [5000]
+    assert m_out["missed_reference_drifts"] == 0
+

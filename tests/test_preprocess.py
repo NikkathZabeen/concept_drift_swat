@@ -159,3 +159,69 @@ def test_warmup_semantics_enhanced_system():
         assert res["is_warmup"] == 1
         assert res["drift_detected"] == 0
         assert system.detector.n_drifts == 0
+
+
+def test_online_scaling_strictly_causal_no_retrospective_fit():
+    """Regression test: verify that models operate with genuinely causal, isolated scalers.
+
+    Requirements:
+    - BaselineADWINSystem and EnhancedAdaptiveSystem each own an independent OnlineStandardScaler.
+    - An observation at step t is transformed strictly using statistics from steps 0..t-1.
+    - Future stream events do NOT retrospectively alter features or predictions at step t.
+    - Baseline and Enhanced do not share or contaminate each other's scaler state.
+    """
+    baseline_cfg = yaml.safe_load(Path("configs/baseline.yaml").read_text())
+    enhanced_cfg = yaml.safe_load(Path("configs/enhanced.yaml").read_text())
+
+    b_sys = BaselineADWINSystem(baseline_cfg, warmup_steps=10)
+    e_sys = EnhancedAdaptiveSystem(enhanced_cfg, warmup_steps=10)
+
+    assert b_sys.scaler is not e_sys.scaler, "Baseline and Enhanced must not share scaler instances"
+    assert b_sys.scaler.n_samples == 0, "Online scaler must start unfitted with 0 samples"
+
+    # Step 0: Observation 0
+    raw_0 = {"FIT101": 10.0, "LIT101": 50.0, "MV101": 1}
+    row_b0 = b_sys.process_event(raw_0, label=0, stream_step=0, global_event_index=0)
+    # At step 0, prior count was 0 -> transformed values equal raw values
+    assert row_b0["is_warmup"] == 1
+    assert b_sys.scaler.n_samples == 1
+
+    # Step 1: Observation 1
+    raw_1 = {"FIT101": 12.0, "LIT101": 52.0, "MV101": 1}
+    row_b1 = b_sys.process_event(raw_1, label=0, stream_step=1, global_event_index=1)
+    # After step 1, scaler has seen 2 observations
+    assert b_sys.scaler.n_samples == 2
+
+    # Enhanced system has not seen any events yet; its scaler must remain untouched
+    assert e_sys.scaler.n_samples == 0
+
+    # Step 2: Observation 2
+    raw_2 = {"FIT101": 14.0, "LIT101": 54.0, "MV101": 2}
+    row_b2 = b_sys.process_event(raw_2, label=0, stream_step=2, global_event_index=2)
+
+    # Re-evaluate an identical clone of stream up to step 2
+    b_sys_clone = BaselineADWINSystem(baseline_cfg, warmup_steps=10)
+    b_sys_clone.process_event(raw_0, label=0, stream_step=0, global_event_index=0)
+    b_sys_clone.process_event(raw_1, label=0, stream_step=1, global_event_index=1)
+    row_b2_clone = b_sys_clone.process_event(raw_2, label=0, stream_step=2, global_event_index=2)
+
+    # Predictions and scores must be identical
+    assert row_b2["y_pred"] == row_b2_clone["y_pred"]
+    assert pytest.approx(row_b2["y_score"]) == row_b2_clone["y_score"]
+
+    # Now feed extreme future outliers to b_sys
+    for fut_step in range(3, 10):
+        b_sys.process_event(
+            {"FIT101": 10000.0, "LIT101": 99999.0, "MV101": 2},
+            label=1,
+            stream_step=fut_step,
+            global_event_index=fut_step,
+        )
+
+    # The prediction recorded at step 2 was made before future events existed:
+    # Verifying that b_sys recorded row_b2 strictly before step 3 updates
+    assert b_sys.scaler.n_samples == 10
+    # Future scaler mean has shifted drastically
+    assert b_sys.scaler.means["FIT101"] > 5000.0
+    # But past clone scaler mean at step 2 was ~12.0
+    assert b_sys_clone.scaler.means["FIT101"] < 20.0

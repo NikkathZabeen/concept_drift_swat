@@ -1,6 +1,6 @@
 # Continual Learning for Concept-Drifting SWaT Streams
 
-[![Tests](https://img.shields.io/badge/tests-20%20passed-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-23%20passed-brightgreen.svg)]()
 [![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12-blue.svg)]()
 [![Framework](https://img.shields.io/badge/stream%20ML-River%200.22.0-orange.svg)]()
 
@@ -42,11 +42,11 @@ results/runs/latest/   results/plots/      [Docker: InfluxDB / Grafana]
 ## 3. Methodological Integrity & Fixes
 
 This codebase enforces strict streaming machine learning standards:
-1. **Zero Future Data Leakage:** Features are normalized causally using `OnlineStandardScaler` (Welford's algorithm) or an isolated pre-evaluation warm-up prefix. Test events are never used to fit past normalization statistics.
+1. **Zero Future Data Leakage:** Features are normalized causally using isolated `OnlineStandardScaler` instances (Welford's algorithm) per model. Test events are never used to fit past normalization statistics.
 2. **Warm-Up Isolation:** Warm-up prefix events are explicitly excluded from scored classification metrics. In smoke mode, `stream_step` tracking guarantees the detector remains inactive during the intended calibration window regardless of global starting row index.
 3. **Probability-Based Metrics:** Evaluates continuous positive-class probabilities ($P(\text{Attack} \mid x)$) for true continuous ROC-AUC and Average Precision (PR-AUC), eliminating degenerate binary step-function approximations.
 4. **Fair Timing Boundaries:** Synchronized, microsecond-accurate timers capture prediction, detector, drift response, and learning latency independently across both methods.
-5. **Cross-Platform Compatibility:** Memory profiling via `psutil` Process RSS (no Unix-only `resource` crashes on Windows); directory junction fallback for Windows environments without developer mode.
+5. **Cross-Platform Compatibility:** Memory profiling via `psutil` Process RSS and peak working set; directory junction fallback for Windows environments without developer mode.
 
 ---
 
@@ -87,10 +87,11 @@ Place the SWaT CSV files in `archive/` (excluded from git via `.gitignore`):
 
 ## 6. Execution Commands
 
-### Run Unit Test Suite (20 Tests)
+### Run Unit Test Suite (23 Tests)
 ```bash
 pytest tests/ -v
 ```
+
 
 ### Run Smoke Experiment
 ```bash
