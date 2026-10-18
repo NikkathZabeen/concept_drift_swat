@@ -1,0 +1,12 @@
+method: baseline_adwin
+classifier:
+  name: hoeffding_tree
+  grace_period: 200
+  delta: 1.0e-7
+drift:
+  type: supervised_adwin
+  delta: 0.002
+  min_instances_between_drifts: 30
+adaptation:
+  policy: full_reset
+  retrain_buffer_size: 2000

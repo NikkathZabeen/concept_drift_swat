@@ -1,0 +1,17 @@
+method: enhanced_adaptive
+classifier:
+  name: adaptive_random_forest
+  n_models: 10
+  seed: 42
+drift:
+  type: adwin_u
+  delta: 0.005
+  stat_buffer_size: 256
+  monitor_stats:
+    - mean
+    - std
+  min_instances_between_drifts: 200
+adaptation:
+  policy: soft_reset_with_buffer
+  retrain_buffer_size: 3000
+  min_instances_between_resets: 200

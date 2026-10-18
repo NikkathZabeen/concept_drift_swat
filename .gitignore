@@ -1,0 +1,33 @@
+# Python / tooling
+.venv/
+venv/
+.mplconfig/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# OS / secrets
+.DS_Store
+.env
+*.log
+
+# SWaT dataset (too large for GitHub; download locally — see archive/README.md)
+archive/*.csv
+archive/*.CSV
+
+# Experiment outputs (regenerate with run_project.py)
+results/runs/
+
+# Optional: uncomment to omit regenerated plots from git
+# results/plots/
+
+# Spark / local infra artifacts
+spark-warehouse/
+derby.log
+metastore_db/
+*.parquet.tmp

@@ -1,0 +1,15 @@
+apiVersion: 1
+datasources:
+  - name: InfluxDB-SWaT
+    uid: influx-swat
+    type: influxdb
+    access: proxy
+    url: http://influxdb:8086
+    isDefault: true
+    jsonData:
+      version: Flux
+      organization: swat
+      defaultBucket: metrics
+      queryLanguage: flux
+    secureJsonData:
+      token: swat-dev-token
